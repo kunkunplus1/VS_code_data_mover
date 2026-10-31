@@ -63,6 +63,7 @@ namespace VSCodeDataMover
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "Windows-only application: registry, WScript.Shell.")]
     internal static class Cli
     {
         public static int Run(string[] args)

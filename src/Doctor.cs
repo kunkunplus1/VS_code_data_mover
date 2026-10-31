@@ -33,6 +33,7 @@ namespace VSCodeDataMover
     /// 检查“手动迁移后坏掉”的常见原因：程序找不到、快捷方式失效、PATH 失效、数据联接断裂。
     /// 能修的直接给修复动作，不能修的明确告诉用户原因。
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "Windows-only application: registry, junctions, WinForms.")]
     public static class Doctor
     {
         public static DoctorReport Diagnose(List<Entry> entries)

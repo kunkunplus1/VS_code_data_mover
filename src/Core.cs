@@ -426,6 +426,7 @@ namespace VSCodeDataMover
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "Windows-only application: registry, junctions, WinForms.")]
     public static class Locator
     {
         public static List<Entry> Detect(Dictionary<string, Dictionary<string, string>> state)
