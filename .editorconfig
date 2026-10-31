@@ -1,0 +1,6 @@
+root = true
+
+# This is a Windows-only application: WinForms, NTFS junctions, registry, WScript.Shell.
+# CA1416 (platform compatibility) is a false positive here, so disable it repo-wide.
+[*.cs]
+dotnet_diagnostic.CA1416.severity = none
