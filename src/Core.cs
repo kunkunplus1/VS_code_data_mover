@@ -219,11 +219,7 @@ namespace VSCodeDataMover
 
         public static string StateDir
         {
-            get
-            {
-                if (SimRoot != null) return Path.Combine(SimRoot, "state");
-                return Path.Combine(LocalAppData, "VSCodeDataMover");
-            }
+            get { return ToolData.Root; }
         }
     }
 
@@ -415,6 +411,17 @@ namespace VSCodeDataMover
             catch { }
         }
 
+        public void Relocate(string newFilePath)
+        {
+            FilePath = newFilePath;
+            try
+            {
+                string dir = Path.GetDirectoryName(newFilePath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            }
+            catch { }
+        }
+
         public void Write(string message)
         {
             string line = DateTime.Now.ToString("HH:mm:ss") + "  " + message;
@@ -495,7 +502,12 @@ namespace VSCodeDataMover
                 e.Target = state[e.Key].ContainsKey("Target") ? state[e.Key]["Target"] : null;
             }
 
-            e.Backup = FindLatestBackup(e.Source);
+            e.Backup = FindLatestBackup(e);
+            if (e.Backup == null && state != null && state.ContainsKey(e.Key) && state[e.Key].ContainsKey("Backup"))
+            {
+                string recorded = state[e.Key]["Backup"];
+                if (!string.IsNullOrEmpty(recorded) && Directory.Exists(recorded)) e.Backup = recorded;
+            }
 
             bool exists = FsUtil.Exists(e.Source);
             bool targetExists = !string.IsNullOrEmpty(e.Target) && FsUtil.IsDir(e.Target) && !Reparse.IsReparsePoint(e.Target);
@@ -550,19 +562,39 @@ namespace VSCodeDataMover
             return item.ContainsKey("Phase") ? item["Phase"] : null;
         }
 
-        public static string FindLatestBackup(string source)
+        public static string FindLatestBackup(Entry e)
         {
-            return FindBackup(source, ".vscode-mover-backup-*");
-        }
-
-        public static string FindAnyBackup(string source)
-        {
-            string tool = FindLatestBackup(source);
+            string tool = FindToolBackup(e);
             if (tool != null) return tool;
-            return FindBackup(source, ".migrated-*");
+            return FindLegacyBackup(e.Source, ".vscode-mover-backup-*");
         }
 
-        private static string FindBackup(string source, string suffixPattern)
+        public static string FindAnyBackup(Entry e)
+        {
+            string tool = FindLatestBackup(e);
+            if (tool != null) return tool;
+            return FindLegacyBackup(e.Source, ".migrated-*");
+        }
+
+        private static string FindToolBackup(Entry e)
+        {
+            try
+            {
+                string dir = Path.Combine(ToolData.BackupsDir, e.Key);
+                if (!Directory.Exists(dir)) return null;
+                string leaf = Path.GetFileName(e.Source);
+                string[] found = Directory.GetDirectories(dir, leaf + ".vscode-mover-backup-*");
+                if (found.Length == 0) return null;
+                Array.Sort(found, StringComparer.OrdinalIgnoreCase);
+                return found[found.Length - 1];
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string FindLegacyBackup(string source, string suffixPattern)
         {
             try
             {
