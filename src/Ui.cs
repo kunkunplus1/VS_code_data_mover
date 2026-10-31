@@ -21,6 +21,7 @@ namespace VSCodeDataMover
         private Button btnLog;
         private Button btnHelp;
         private Button btnRepair;
+        private Button btnUninstall;
         private CheckBox chkDeep;
         private ProgressBar bar;
         private Label lblStatus;
@@ -134,6 +135,7 @@ namespace VSCodeDataMover
             btnLog = MakeButton("打开日志", 92);
             btnHelp = MakeButton("使用说明", 92);
             btnRepair = MakeButton("一键修复…", 110);
+            btnUninstall = MakeButton("卸载…", 90);
 
             btnRefresh.Click += delegate { RefreshDetection(); };
             btnMigrate.Click += delegate { StartMigrate(); };
@@ -142,6 +144,7 @@ namespace VSCodeDataMover
             btnLog.Click += delegate { OpenLogFolder(); };
             btnHelp.Click += delegate { ShowHelp(); };
             btnRepair.Click += delegate { ShowRepair(); };
+            btnUninstall.Click += delegate { StartUninstall(); };
 
             buttons.Controls.Add(btnRefresh);
             buttons.Controls.Add(btnMigrate);
@@ -150,6 +153,7 @@ namespace VSCodeDataMover
             buttons.Controls.Add(btnLog);
             buttons.Controls.Add(btnHelp);
             buttons.Controls.Add(btnRepair);
+            buttons.Controls.Add(btnUninstall);
             root.Controls.Add(buttons, 0, 3);
 
             TableLayoutPanel progressPanel = new TableLayoutPanel();
@@ -356,6 +360,7 @@ namespace VSCodeDataMover
             string message = "将迁移 " + count + " 项数据（" + FormatSize(size) + "）到:" + Environment.NewLine + target +
                              Environment.NewLine + Environment.NewLine +
                              "注意：迁移的是 VS Code 的“数据”（设置、扩展、缓存），不是程序安装目录。" + Environment.NewLine +
+                             "迁移前备份会保存在 " + Path.Combine(target, "VSCodeDataMover", "backups") + "（额外占用约 " + FormatSize(size) + "）。" + Environment.NewLine +
                              "迁移前请确认：VS Code 已完全退出、重要文件已保存。" + Environment.NewLine +
                              "工具会先复制并校验，校验通过后才替换为目录联接；失败会自动回滚。";
             if (MessageBox.Show(this, message, "确认迁移", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
@@ -485,6 +490,78 @@ namespace VSCodeDataMover
             }
         }
 
+        private void StartUninstall()
+        {
+            if (busy) return;
+
+            int migrated = 0;
+            foreach (Entry e in entries)
+            {
+                if (e.State == EntryState.Migrated || e.State == EntryState.BrokenTargetMissing ||
+                    e.State == EntryState.InterruptedRename || e.State == EntryState.CopyLeftover ||
+                    e.State == EntryState.RestoreLeftover)
+                    migrated++;
+            }
+
+            bool restoreFirst = false;
+            if (migrated > 0)
+            {
+                DialogResult answer = MessageBox.Show(this,
+                    "检测到 " + migrated + " 项数据仍在迁移状态（C 盘是目录联接）。" + Environment.NewLine + Environment.NewLine +
+                    "“是”：先还原数据到 C 盘，再卸载（推荐）" + Environment.NewLine +
+                    "“否”：保留迁移状态，只删除工具（VS Code 仍可正常使用）" + Environment.NewLine +
+                    "“取消”：返回",
+                    "卸载前确认", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+                if (answer == DialogResult.Cancel) return;
+                restoreFirst = (answer == DialogResult.Yes);
+            }
+
+            bool deleteExe = MessageBox.Show(this,
+                "是否同时删除 VSCodeDataMover.exe？" + Environment.NewLine + Environment.NewLine +
+                "删除后无法再用本工具；src、README、build.ps1 不受影响。",
+                "删除程序", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+
+            string summary = "将执行：" + Environment.NewLine +
+                (restoreFirst ? "· 还原数据到 C 盘" : "· 保留当前迁移状态（联接不动）") + Environment.NewLine +
+                "· 删除工具数据（state / logs / backups）" + Environment.NewLine +
+                "· 删除注册表项 HKCU\\Software\\VSCodeDataMover" + Environment.NewLine +
+                (deleteExe ? "· 删除程序本身（退出后）" : "· 保留程序");
+            if (MessageBox.Show(this, summary + Environment.NewLine + Environment.NewLine + "确定卸载吗？",
+                "确认卸载", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+                return;
+
+            busy = true;
+            UpdateButtons();
+            lblStatus.Text = "正在卸载清理…";
+
+            Task.Factory.StartNew(delegate
+            {
+                return Uninstaller.Run(entries, restoreFirst, deleteExe, log);
+            }).ContinueWith(delegate(Task<OpResult> t)
+            {
+                busy = false;
+                UpdateButtons();
+                OpResult r = t.IsFaulted ? FailUninstall(t.Exception.GetBaseException().Message) : t.Result;
+                MessageBox.Show(this, string.Join(Environment.NewLine, r.Lines.ToArray()), r.Summary,
+                    MessageBoxButtons.OK, r.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                if (deleteExe && !t.IsFaulted && t.Result.Ok)
+                {
+                    Close();
+                    return;
+                }
+                RefreshDetection();
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        private static OpResult FailUninstall(string message)
+        {
+            OpResult r = new OpResult();
+            r.Ok = false;
+            r.Summary = "卸载失败";
+            r.Add("错误: " + message);
+            return r;
+        }
+
         private void ShowRepair()
         {
             if (busy) return;
@@ -532,7 +609,8 @@ namespace VSCodeDataMover
                 "4. 还原时点击“一键还原”，数据会搬回 C 盘原路径。\n" +
                 "5. 迁移前必须完全退出 VS Code。\n" +
                 "6. 所有操作都会先复制校验，失败自动回滚。\n" +
-                "7. 如果之前手动移动过数据导致异常，点“一键修复…”会自动检查并修复。",
+                "7. 如果之前手动移动过数据导致异常，点“一键修复…”会自动检查并修复。\n" +
+                "8. 不再使用时点“卸载…”：可先还原数据，再清除工具数据、注册表，并可删除程序本身。",
                 "使用说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
@@ -565,6 +643,7 @@ namespace VSCodeDataMover
             btnBrowse.Enabled = !busy;
             btnCloseCode.Enabled = !busy;
             btnRepair.Enabled = !busy;
+            btnUninstall.Enabled = !busy;
             txtTarget.Enabled = !busy;
             chkDeep.Enabled = !busy;
         }

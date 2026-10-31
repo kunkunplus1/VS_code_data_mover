@@ -48,7 +48,11 @@ D:\VS Code Data\
 ├── Roaming\Code\                          ← C:\Users\<你>\AppData\Roaming\Code
 ├── User\.vscode\                          ← C:\Users\<你>\.vscode
 ├── User\.vscode-shared\                   ← C:\Users\<你>\.vscode-shared
-└── Local\Microsoft\vscode-cpptools\       ← C:\Users\<你>\AppData\Local\Microsoft\vscode-cpptools
+├── Local\Microsoft\vscode-cpptools\       ← C:\Users\<你>\AppData\Local\Microsoft\vscode-cpptools
+└── VSCodeDataMover\                       ← 工具自己的数据（不在 C 盘）
+    ├── state.json                         ← 迁移状态
+    ├── logs\                              ← 工具日志 / robocopy 日志
+    └── backups\<数据项>\                  ← 迁移前备份
 ```
 
 C 盘原路径会变成指向这些目录的联接，VS Code 照旧按原路径读写。
@@ -63,14 +67,14 @@ C 盘原路径会变成指向这些目录的联接，VS Code 照旧按原路径�
    - VS Code 必须完全退出（检测 `Code` / `Code - Insiders` / `VSCodium` 进程）
    - 目标不能是磁盘根目录、系统目录、源目录本身或源目录内部
    - 目标子目录必须不存在或为空
-   - 检查目标盘剩余空间（数据量 × 1.05 + 100 MB）
+   - 检查目标盘剩余空间（数据量 × 2.1 + 100 MB，因为还要放一份迁移前备份）
    - 目标目录写入测试
 2. **复制**：Robocopy `/E /COPY:DAT /DCOPY:DAT /MT:16`，保留时间戳
 3. **校验**
    - 默认：文件数量、相对路径、每个文件大小 + 关键文件 SHA256
      （`settings.json`、`storage.json`、`extensions.json`、`argv.json`、`state.vscdb`）
    - 深度校验：逐文件 SHA256
-4. **替换**：源目录改名为 `xxx.vscode-mover-backup-时间戳`，再在原路径创建 Junction
+4. **替换**：源目录先改名为临时目录，创建 Junction 后再把临时目录移到 `VSCodeDataMover\backups\<数据项>\`
 5. **验证联接**：读取联接目标，确认等于预期目标，并通过联接访问目录
 6. **失败回滚**：联接创建失败 → 删除联接 → 改回原名 → 清理目标副本
 
@@ -78,10 +82,12 @@ C 盘原路径会变成指向这些目录的联接，VS Code 照旧按原路径�
 
 - 每次操作前把状态写入 `%LOCALAPPDATA%\VSCodeDataMover\state.json`，进程被杀后可运行修复
 - 中断恢复：源目录已改名但联接没建成时，下次打开会显示“中断待恢复”，`--recover` 可补建联接或回退
-- 备份保留：每次迁移只保留最近 1 个工具备份，避免反复迁移撑爆 C 盘
+- 备份保留：每次迁移只保留最近 1 个工具备份，避免反复迁移撑爆磁盘
+- **工具数据不占 C 盘**：`state.json`、`logs\`、`backups\` 全部放在目标目录的 `VSCodeDataMover\` 下；
+  C 盘只留一个注册表指针 `HKCU\Software\VSCodeDataMover\DataRoot`，不再创建 `%LOCALAPPDATA%\VSCodeDataMover`
 - 还原时会重新校验，校验通过后才删除目标盘副本
-- 目标盘不可用（例如 D 盘没挂载）时，可从 C 盘备份恢复，并明确提示“迁移后的改动可能丢失”
-- 全程日志：`%LOCALAPPDATA%\VSCodeDataMover\logs\`
+- 目标盘不可用（例如 D 盘没挂载）时，可从 `VSCodeDataMover\backups` 恢复，并明确提示“迁移后的改动可能丢失”
+- 全程日志：`<目标目录>\VSCodeDataMover\logs\`
 
 ---
 
@@ -151,6 +157,9 @@ VSCodeDataMover.exe --restore-history "VS Code-userdata" "D:\备份\Code"
 VSCodeDataMover.exe --doctor
 VSCodeDataMover.exe --doctor --history
 VSCodeDataMover.exe --fix
+VSCodeDataMover.exe --uninstall
+VSCodeDataMover.exe --uninstall --keep-migrated
+VSCodeDataMover.exe --uninstall --delete-program
 VSCodeDataMover.exe --version
 ```
 
@@ -208,7 +217,8 @@ A：官方卸载器不会删用户数据；但如果你手动“彻底清理”�
 “还原”功能搬回来，再卸载。
 
 **Q：为什么迁移后 C 盘还有 `xxx.vscode-mover-backup-*`？**
-A：那是迁移前的备份，确认使用正常后可以删除；下次迁移会自动只保留最近 1 个。
+A：旧版本会放在源目录旁边；现在备份统一放在目标目录的
+`VSCodeDataMover\backups\<数据项>\`，C 盘不会再留备份。确认使用正常后可不定期清理旧备份。
 
 **Q：支持绿色版 / 便携版 VS Code 吗？**
 A：检测到安装目录下有 `data` 文件夹（便携模式）时会在界面上提示。
@@ -231,8 +241,52 @@ A：测试中连续 50 轮“迁移 → 改数据 → 还原”全部通过，�
   `DeviceIoControl(FSCTL_GET_REPARSE_POINT)` 解析 `IO_REPARSE_TAG_MOUNT_POINT`。
 - **长路径**：清单声明 `longPathAware`，内部统一使用 `\\?\` 前缀，
   并声明 `TargetFramework 4.8` 以启用 .NET 的长路径处理。
-- **状态文件**：`%LOCALAPPDATA%\VSCodeDataMover\state.json`，
-  记录 Target / Backup / Phase，用于中断恢复。
-- **备份命名**：`<原名>.vscode-mover-backup-yyyyMMdd-HHmmss`，只保留最近 1 个。
+- **状态文件**：`<目标目录>\VSCodeDataMover\state.json`，
+  记录 Target / Backup / Phase，用于中断恢复；位置由注册表
+  `HKCU\Software\VSCodeDataMover\DataRoot` 指向。
+- **备份命名**：`<原名>.vscode-mover-backup-yyyyMMdd-HHmmss`，放在
+  `<目标目录>\VSCodeDataMover\backups\<数据项>\`，只保留最近 1 个。
 - **进程检测**：`Code`、`Code - Insiders`、`VSCodium`；
   “关闭 VS Code”发送 `CloseMainWindow` 并等待，不会强杀未保存的工作。
+
+---
+
+## 九、软件生命周期
+
+本工具是绿色单文件，没有安装程序，但同样按完整生命周期处理：
+
+### 首次运行
+
+- 双击 exe 即可，不写系统目录、不需要管理员。
+- 数据根目录默认 `%LOCALAPPDATA%\VSCodeDataMover`；第一次“一键迁移”时会自动搬到
+  `<目标目录>\VSCodeDataMover`，并在注册表留下指针：
+  `HKCU\Software\VSCodeDataMover\DataRoot`。
+
+### 升级
+
+- 直接用新 exe 覆盖旧 exe 即可。
+- 注册表指针和工具数据（state / logs / backups）保持不变，不需要重新迁移。
+- 源码与构建脚本不参与运行，可放在别处。
+
+### 卸载
+
+主界面点 **“卸载…”**，或命令行 `--uninstall`。流程会：
+
+1. 询问是否先把迁移中的数据还原到 C 盘（推荐）；
+2. 删除工具数据：`state.json`、`logs\`、`backups\`；
+3. 删除注册表项 `HKCU\Software\VSCodeDataMover`；
+4. 询问是否删除 `VSCodeDataMover.exe` 本身（退出后自动删）。
+
+两种卸载方式：
+
+| 方式 | 结果 |
+|---|---|
+| 先还原再卸载（默认） | C 盘恢复真实目录，D 盘副本和工具数据清空，VS Code 照常使用 |
+| `--keep-migrated` | 保留 C 盘联接和 D 盘数据（VS Code 继续可用），只删工具数据/注册表 |
+
+### 残留处理
+
+- 启动时会自愈：如果注册表指向的数据目录已不存在（且所在磁盘还在），自动删除失效指针。
+- 旧版本残留的 `%LOCALAPPDATA%\VSCodeDataMover` 会在卸载时一并清理。
+- 日志按 30 天自动清理，避免长期使用越积越多。
+- 迁移中断留下的临时目录/半副本，可用“一键修复…”处理。

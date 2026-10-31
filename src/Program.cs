@@ -23,6 +23,9 @@ namespace VSCodeDataMover
         {
             if (args.Length > 0 && string.Equals(args[0], "--repair-window", StringComparison.OrdinalIgnoreCase))
             {
+                ToolData.Heal();
+                ToolData.Ensure();
+                ToolData.PruneLogs(30);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new RepairForm());
@@ -41,6 +44,9 @@ namespace VSCodeDataMover
                 }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                ToolData.Heal();
+                ToolData.Ensure();
+                ToolData.PruneLogs(30);
                 Application.Run(new MainForm());
             }
             return 0;
@@ -80,23 +86,27 @@ namespace VSCodeDataMover
             bool deep = HasFlag(args, "--deep");
             bool quiet = HasFlag(args, "--quiet");
 
+            if (command == "--version")
+            {
+                Console.WriteLine("VS Code Data Mover 1.0.0");
+                return 0;
+            }
+
+            if (command == "--help" || command == "-h" || command == "/?")
+            {
+                PrintUsage();
+                return 0;
+            }
+
+            ToolData.Heal();
+            ToolData.Ensure();
+            ToolData.PruneLogs(30);
+
             string logFile = Path.Combine(Paths.StateDir, "logs", "cli-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
             Log log = new Log(logFile);
 
             try
             {
-                if (command == "--version")
-                {
-                    Console.WriteLine("VS Code Data Mover 1.0.0");
-                    return 0;
-                }
-
-                if (command == "--help" || command == "-h" || command == "/?")
-                {
-                    PrintUsage();
-                    return 0;
-                }
-
                 if (command == "--list" || command == "--detect")
                 {
                     return List(deep, quiet, log);
@@ -136,6 +146,11 @@ namespace VSCodeDataMover
                 if (command == "--fix")
                 {
                     return FixCmd(quiet, log);
+                }
+
+                if (command == "--uninstall")
+                {
+                    return UninstallCmd(args, quiet, log);
                 }
 
                 if (command == "--restore-history")
@@ -311,6 +326,19 @@ namespace VSCodeDataMover
             return result.Ok ? 0 : 1;
         }
 
+        private static int UninstallCmd(string[] args, bool quiet, Log log)
+        {
+            bool keepMigrated = HasFlag(args, "--keep-migrated");
+            bool deleteProgram = HasFlag(args, "--delete-program");
+
+            Dictionary<string, Dictionary<string, string>> state = StateStore.Load();
+            List<Entry> entries = Locator.Detect(state, true);
+            OpResult result = Uninstaller.Run(entries, !keepMigrated, deleteProgram, log);
+            foreach (string line in result.Lines) Console.WriteLine(line);
+            Console.WriteLine(result.Summary);
+            return result.Ok ? 0 : 1;
+        }
+
         private static List<string> GetPositionals(string[] args, int start)
         {
             List<string> list = new List<string>();
@@ -412,6 +440,9 @@ namespace VSCodeDataMover
             Console.WriteLine("  --restore-history <key> <目录> 用历史候选目录恢复某一项数据");
             Console.WriteLine("  --doctor                       体检：程序本体/快捷方式/注册表/PATH/数据");
             Console.WriteLine("  --fix                          体检并自动修复可修复项");
+            Console.WriteLine("  --uninstall                    卸载清理（默认先还原数据）");
+            Console.WriteLine("  --uninstall --keep-migrated    保留迁移状态，只清理工具数据和注册表");
+            Console.WriteLine("  --delete-program               连同 VSCodeDataMover.exe 一起删除");
             Console.WriteLine("  --deep                         深度校验（逐文件 SHA256）");
             Console.WriteLine("  --sim-root <路径>              测试用：模拟用户目录");
             Console.WriteLine("  --quiet                        安静模式");

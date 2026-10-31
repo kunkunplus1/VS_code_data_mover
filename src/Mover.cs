@@ -93,7 +93,7 @@ namespace VSCodeDataMover
             string root = ValidateTargetRoot(targetRoot, todo);
             long totalBytes = 0;
             foreach (Entry e in todo) totalBytes += e.SizeBytes;
-            CheckFreeSpace(root, totalBytes);
+            CheckFreeSpace(root, totalBytes * 2);
 
             foreach (Entry e in todo)
             {
@@ -105,6 +105,13 @@ namespace VSCodeDataMover
                     if (!FsUtil.IsEmptyDir(planned))
                         throw new MoverException("目标目录已存在且不为空，请换一个目标文件夹或先清空: " + planned);
                 }
+            }
+
+            if (Paths.SimRoot == null)
+            {
+                ToolData.TrySetRoot(Path.Combine(root, "VSCodeDataMover"));
+                if (Log != null && !string.IsNullOrEmpty(Log.FilePath))
+                    Log.Relocate(Path.Combine(ToolData.LogsDir, Path.GetFileName(Log.FilePath)));
             }
 
             int index = 0;
@@ -197,7 +204,7 @@ namespace VSCodeDataMover
                     {
                         try
                         {
-                            FsUtil.MoveDir(e.Backup, e.Source);
+                            MoveDirRobust(e.Backup, e.Source);
                             StateStore.Remove(e.Key);
                             result.Add("已回退中断的迁移: " + e.Source);
                             fixedCount++;
@@ -250,7 +257,7 @@ namespace VSCodeDataMover
             {
                 if (e.State != EntryState.BrokenTargetMissing) continue;
 
-                string fallback = e.Backup != null ? e.Backup : Locator.FindAnyBackup(e.Source);
+                string fallback = e.Backup != null ? e.Backup : Locator.FindAnyBackup(e);
                 if (fallback == null)
                 {
                     result.Ok = false;
@@ -261,7 +268,7 @@ namespace VSCodeDataMover
                 try
                 {
                     if (Reparse.IsReparsePoint(e.Source)) FsUtil.DeleteJunction(e.Source);
-                    FsUtil.MoveDir(fallback, e.Source);
+                    MoveDirRobust(fallback, e.Source);
                     StateStore.Remove(e.Key);
                     e.State = EntryState.Normal;
                     e.StateText = "未迁移";
@@ -300,13 +307,15 @@ namespace VSCodeDataMover
             CheckSourceSpace(e.Source, size);
 
             string backup = null;
+            string temp = null;
             bool renamed = false;
             if (FsUtil.Exists(e.Source))
             {
                 if (Reparse.IsReparsePoint(e.Source))
                     throw new MoverException("源路径是目录联接，请先点“一键还原”。");
-                backup = MakeBackupName(e.Source);
-                FsUtil.MoveDir(e.Source, backup);
+                backup = MakeBackupName(e.Source, e.Key);
+                temp = e.Source + ".vscode-mover-tmp-" + FsUtil.Timestamp();
+                FsUtil.MoveDir(e.Source, temp);
                 renamed = true;
             }
 
@@ -319,9 +328,11 @@ namespace VSCodeDataMover
             catch
             {
                 TryDelete(e.Source);
-                if (renamed && !FsUtil.Exists(e.Source)) FsUtil.MoveDir(backup, e.Source);
+                if (renamed && !FsUtil.Exists(e.Source) && FsUtil.Exists(temp)) FsUtil.MoveDir(temp, e.Source);
                 throw;
             }
+
+            if (renamed) backup = MoveTempToBackups(temp, backup, e);
 
             StateStore.Set(e.Key, "", backup, "history-restored");
             e.State = EntryState.Normal;
@@ -374,12 +385,13 @@ namespace VSCodeDataMover
                 throw;
             }
 
-            string backup = MakeBackupName(e.Source);
+            string backup = MakeBackupName(e.Source, e.Key);
+            string temp = e.Source + ".vscode-mover-tmp-" + FsUtil.Timestamp();
             StateStore.Set(e.Key, target, backup, "migrating");
 
             try
             {
-                FsUtil.MoveDir(e.Source, backup);
+                FsUtil.MoveDir(e.Source, temp);
             }
             catch (Exception ex)
             {
@@ -399,18 +411,21 @@ namespace VSCodeDataMover
             catch
             {
                 if (Reparse.IsReparsePoint(e.Source)) FsUtil.DeleteJunction(e.Source);
-                if (!FsUtil.Exists(e.Source) && FsUtil.Exists(backup)) FsUtil.MoveDir(backup, e.Source);
+                if (!FsUtil.Exists(e.Source) && FsUtil.Exists(temp)) FsUtil.MoveDir(temp, e.Source);
                 StateStore.Remove(e.Key);
                 TryDelete(target);
                 throw;
             }
+
+            Step(index, total, 92, "保存迁移前备份 " + e.DisplayName + " ...");
+            backup = MoveTempToBackups(temp, backup, e);
 
             StateStore.Set(e.Key, target, backup, "migrated");
             e.State = EntryState.Migrated;
             e.StateText = "已迁移";
             e.Target = target;
             e.Backup = backup;
-            DeleteOldBackups(e.Source, backup);
+            DeleteOldBackups(e.Key, backup);
             Step(index, total, 100, "完成 " + e.DisplayName);
         }
 
@@ -445,12 +460,12 @@ namespace VSCodeDataMover
 
             if (!targetOk)
             {
-                string fallback = e.Backup != null ? e.Backup : Locator.FindAnyBackup(e.Source);
+                string fallback = e.Backup != null ? e.Backup : Locator.FindAnyBackup(e);
                 if (fallback == null)
                     throw new MoverException("目标路径不可用，也没有迁移前的备份，无法自动还原: " + target);
 
                 if (Reparse.IsReparsePoint(e.Source)) FsUtil.DeleteJunction(e.Source);
-                FsUtil.MoveDir(fallback, e.Source);
+                MoveDirRobust(fallback, e.Source);
                 StateStore.Remove(e.Key);
                 e.State = EntryState.Normal;
                 e.StateText = "未迁移";
@@ -478,7 +493,12 @@ namespace VSCodeDataMover
                 VerifyCopy(target, e.Source, e);
                 Step(index, total, 85, "清理 D 盘副本 " + e.DisplayName + " ...");
 
-                if (e.Backup != null && FsUtil.Exists(e.Backup)) FsUtil.DeleteTree(e.Backup);
+                if (e.Backup != null && FsUtil.Exists(e.Backup))
+                {
+                    string backupParent = Path.GetDirectoryName(e.Backup);
+                    FsUtil.DeleteTree(e.Backup);
+                    TryRemoveEmptyDir(backupParent);
+                }
                 FsUtil.DeleteTree(target);
                 StateStore.Remove(e.Key);
             }
@@ -684,9 +704,68 @@ namespace VSCodeDataMover
                 throw new MoverException("检测到 VS Code 正在运行（" + string.Join("、", procs.ToArray()) + "），请先完全退出后再操作。");
         }
 
-        private static string MakeBackupName(string source)
+        private string MoveTempToBackups(string temp, string backup, Entry e)
         {
-            string dir = Path.GetDirectoryName(source);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(backup));
+                if (string.Equals(Path.GetPathRoot(temp), Path.GetPathRoot(backup), StringComparison.OrdinalIgnoreCase))
+                {
+                    if (FsUtil.Exists(backup)) FsUtil.DeleteTree(backup);
+                    FsUtil.MoveDir(temp, backup);
+                }
+                else
+                {
+                    CopyTree(temp, backup, e.Key + "-backup");
+                    VerifyCopy(temp, backup, e);
+                    FsUtil.DeleteTree(temp);
+                }
+                return backup;
+            }
+            catch (Exception ex)
+            {
+                string legacy = Path.Combine(Path.GetDirectoryName(temp),
+                    Path.GetFileName(e.Source) + ".vscode-mover-backup-" + FsUtil.Timestamp());
+                try
+                {
+                    if (FsUtil.Exists(temp)) FsUtil.MoveDir(temp, legacy);
+                    AddLine("提示: 备份未能移动到目标目录，已保留在 " + legacy + "（" + ex.Message + "）");
+                    return legacy;
+                }
+                catch
+                {
+                    AddLine("提示: 备份仍保留在临时目录 " + temp + "（" + ex.Message + "）");
+                    return temp;
+                }
+            }
+        }
+
+        private void MoveDirRobust(string src, string dst)
+        {
+            if (!FsUtil.Exists(src)) return;
+            if (string.Equals(Path.GetPathRoot(src), Path.GetPathRoot(dst), StringComparison.OrdinalIgnoreCase))
+            {
+                FsUtil.MoveDir(src, dst);
+                return;
+            }
+
+            try
+            {
+                CopyTree(src, dst, Path.GetFileName(src));
+                VerifyCopy(src, dst, null);
+                FsUtil.DeleteTree(src);
+            }
+            catch
+            {
+                TryDelete(dst);
+                throw;
+            }
+        }
+
+        private static string MakeBackupName(string source, string key)
+        {
+            string dir = Path.Combine(ToolData.BackupsDir, key);
+            Directory.CreateDirectory(dir);
             string leaf = Path.GetFileName(source);
             string baseName = Path.Combine(dir, leaf + ".vscode-mover-backup-" + FsUtil.Timestamp());
             string name = baseName;
@@ -699,18 +778,29 @@ namespace VSCodeDataMover
             return name;
         }
 
-        private static void DeleteOldBackups(string source, string keep)
+        private static void DeleteOldBackups(string key, string keep)
         {
             try
             {
-                string dir = Path.GetDirectoryName(source);
-                string leaf = Path.GetFileName(source);
-                foreach (string d in Directory.GetDirectories(dir, leaf + ".vscode-mover-backup-*"))
+                string dir = Path.Combine(ToolData.BackupsDir, key);
+                if (!Directory.Exists(dir)) return;
+                foreach (string d in Directory.GetDirectories(dir, "*.vscode-mover-backup-*"))
                 {
                     if (string.Equals(FsUtil.Norm(d), FsUtil.Norm(keep), StringComparison.OrdinalIgnoreCase)) continue;
                     try { FsUtil.DeleteTree(d); }
                     catch { }
                 }
+            }
+            catch { }
+        }
+
+        private static void TryRemoveEmptyDir(string dir)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) &&
+                    Directory.GetFileSystemEntries(dir).Length == 0)
+                    Directory.Delete(dir);
             }
             catch { }
         }
