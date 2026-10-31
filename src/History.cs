@@ -25,6 +25,7 @@ namespace VSCodeDataMover
     /// 从系统/软件留下的历史痕迹里，寻找“用户手动移动之前”的 VS Code 数据目录。
     /// 只做线索收集和内容判定，是否恢复由用户决定；恢复前一定会备份当前数据。
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416:Validate platform compatibility", Justification = "Windows-only application: registry, WScript.Shell.")]
     public static class HistoryScanner
     {
         private static readonly Regex PathRegex = new Regex(@"[A-Za-z]:\\[^""'<>\|\r\n\t]*", RegexOptions.Compiled);
